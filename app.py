@@ -292,10 +292,17 @@ def initialize_system_components():
             success, message = start_streamlit_app(app_name, script_path, processes[app_name]['port'])
             logs.append(f"{app_name}: {message}")
             if success:
-                startup_success, startup_message = wait_for_app_startup(app_name, 30)
+                # 冷启动要 import torch/sentence-transformers，30s 在慢机器上不够，放宽到 120s
+                startup_success, startup_message = wait_for_app_startup(app_name, 120)
                 logs.append(f"{app_name} 启动检查: {startup_message}")
                 if not startup_success:
-                    errors.append(f"{app_name} 启动失败: {startup_message}")
+                    tail = read_app_log_tail(app_name)
+                    if tail:
+                        logs.append(f"{app_name} 日志末尾:\n{tail}")
+                        last_line = tail.splitlines()[-1].strip()
+                        errors.append(f"{app_name} 启动失败: {startup_message} | {last_line}")
+                    else:
+                        errors.append(f"{app_name} 启动失败: {startup_message}")
             else:
                 errors.append(f"{app_name} 启动失败: {message}")
         else:
@@ -319,13 +326,16 @@ def initialize_system_components():
             if initialize_report_engine():
                 logs.append("ReportEngine 初始化成功")
             else:
-                msg = "ReportEngine 初始化失败"
+                # 报告引擎缺 API Key / 依赖时降级，不阻断三个分析 Agent 启动。
+                # 前端可通过 /api/report/* 看到它未就绪。
+                msg = ("ReportEngine 未就绪（多半是 .env 里 REPORT_ENGINE_API_KEY 为空），"
+                       "报告生成功能不可用，其余 Agent 照常运行")
                 logs.append(msg)
-                errors.append(msg)
+                logger.warning(msg)
         except Exception as exc:  # pragma: no cover
-            msg = f"ReportEngine 初始化异常: {exc}"
+            msg = f"ReportEngine 初始化异常（已降级，不阻断）: {exc}"
             logs.append(msg)
-            errors.append(msg)
+            logger.warning(msg)
 
     if errors:
         cleanup_processes()
@@ -817,6 +827,19 @@ def wait_for_app_startup(app_name, max_wait_time=90):
 
     return False, "启动超时"
 
+
+def read_app_log_tail(app_name: str, lines: int = 12) -> str:
+    """读取子应用日志末尾若干行，把真实报错回传给前端（否则前端只能看到"进程启动失败"）。"""
+    log_path = LOG_DIR / f"{app_name}.log"
+    if not log_path.exists():
+        return ""
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as fh:
+            tail = fh.readlines()[-lines:]
+        return "".join(tail).strip()
+    except Exception:
+        return ""
+
 def cleanup_processes():
     """清理所有进程"""
     _log_shutdown_step("开始串行清理子进程")
@@ -1260,9 +1283,10 @@ def start_system():
             return jsonify({'success': True, 'message': '系统启动成功', 'logs': logs})
 
         _set_system_state(started=False)
+        detail = errors[0] if errors else '未知原因'
         return jsonify({
             'success': False,
-            'message': '系统启动失败',
+            'message': f'系统启动失败: {detail}',
             'logs': logs,
             'errors': errors
         }), 500

@@ -158,7 +158,10 @@ class MindSpider:
                 cwd=self.schema_path,
                 capture_output=True,
                 text=True,
-                encoding='utf-8'
+                encoding='utf-8',
+                # Windows 上子进程（SQLAlchemy/loguru）会吐 GBK 字节，严格 utf-8 解码会让
+                # 读取线程抛 UnicodeDecodeError（日志里那条 _readerthread 崩溃即此），这里降级替换
+                errors='replace'
             )
             
             if result.returncode == 0:
