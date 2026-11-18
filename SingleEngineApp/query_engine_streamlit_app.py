@@ -27,6 +27,14 @@ except locale.Error:
 # 添加src目录到Python路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# 兜底 stdout：父进程 app.py 死掉后管道读端消失，业务代码里的 print 会抛
+# OSError: [Errno 22] Invalid argument，把整条分析链路打断。换成不会抛的版本。
+try:
+    from utils.safe_console import install_safe_print
+    install_safe_print()
+except Exception:
+    pass
+
 from QueryEngine import DeepSearchAgent, Settings
 from config import settings
 from utils.github_issues import error_with_issue_link

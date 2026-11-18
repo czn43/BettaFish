@@ -122,6 +122,25 @@ pip 会提示 `streamlit 1.28.1 requires numpy<2,>=1.19.3` —— 那是包元�
 | 5 | 前端只显示「系统启动失败」，看不到原因 | `/api/system/start` 的 message 是固定文案 | `read_app_log_tail()` + message 带 `errors[0]` |
 | 6 | Insight 跑到 `report_structure_node` 报 `openai.NotFoundError: Error code: 404` | `*_BASE_URL` 写成 `https://jpn.cdn.moxuna.com`，缺 `/v1`，openai SDK 拼成 `/chat/completions` → 网关 404 | 六组 BASE_URL 全部改成 `.../v1` |
 | 7 | `curl ... ^ -H ...` 报 `-H 项无法识别`、`invalid JSON request body` | PowerShell 续行符是反引号 `` ` ``，不是 cmd 的 `^` | 改用反引号或 `Invoke-RestMethod` |
+| 8 | 分析跑到一半报 `OSError: [Errno 22] Invalid argument`，栈顶停在 `print(f"--- TOOL: ...")` | 父进程 app.py 被关掉/强杀，子进程变孤儿；它的 stdout 是 `subprocess.PIPE`，读端没了，任何 `print` 都 OSError 22 | `utils/safe_console.py` 把 `builtins.print` 换成永不抛的版本，三个 Streamlit 入口启动时安装 |
+| 9 | `Port 8503 is already in use`，新一轮启动直接失败 | 上一轮孤儿 streamlit 还占着端口 | `utils/process_guard.py`：启动前清端口 + Job Object kill-on-close 让子进程随父进程一起死 |
+
+**坑 8 的本质**：这不是业务 bug，是「日志写不出去把业务打断」。项目里有 150+ 处 `print()`（QueryEngine 17、InsightEngine 24、ReportEngine 49、MindSpider 57、ForumEngine 3），只要 stdout 断掉，任何一处都会炸。修法是让 print 永不抛异常，而不是逐处改。
+
+**坑 9 的本质**：`app.py` 用 `subprocess.PIPE` 接子进程输出，父进程一死管道就断，但子进程不会跟着死。Windows 上用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 让系统连带清理。
+
+验证方法（硬杀父进程，子进程必须一起消失）：
+
+```powershell
+# 1) 启动
+.\.venv\Scripts\python.exe app.py
+# 2) 页面点启动，确认 8501/8502/8503 都在监听
+Get-NetTCPConnection -LocalPort 8501,8502,8503 -State Listen
+# 3) 直接强杀父进程（模拟关窗口/任务管理器结束）
+Stop-Process -Id <app.py 的 PID> -Force
+# 4) 5 秒后复查：应当一个都不剩
+Get-NetTCPConnection -LocalPort 8501,8502,8503 -State Listen
+```
 
 **坑 6 的判断方法**（不用翻文档就能确认路径对不对）：
 
@@ -143,12 +162,16 @@ curl.exe -s https://jpn.cdn.moxuna.com/v1/models   # → 401 Invalid token (new_
 | `INSIGHT_ENGINE_*` | 私有库挖掘 Agent（8501） | `deepseek-v4.1-flash` |
 | `MEDIA_ENGINE_*` | 多模态 Agent（8502） | `deepseek-v4.1-flash` |
 | `QUERY_ENGINE_*` | 网页搜索 Agent（8503） | `deepseek-v4.1-flash` |
-| `REPORT_ENGINE_*` | 报告生成（图表/长段落，对模型能力要求高） | `deepseek-v4-pro` |
+| `REPORT_ENGINE_*` | 报告生成（图表/长段落，对模型能力要求高） | `deepseek-v4-pro-exclusive` |
 | `FORUM_HOST_*` | 论坛主持人（多方讨论） | `deepseek-v4.1-flash` |
 | `KEYWORD_OPTIMIZER_*` | SQL 关键词优化 | `deepseek-v4.1-flash` |
 | `MINDSPIDER_*` | 爬虫关键词/摘要 | 未配置（可留空） |
 
-网关可用模型（`/v1/models` 实测）：`deepseek-flash`、`deepseek-v4.1-flash`、`deepseek-v4-pro`。
+网关可用模型（`/v1/models` 实测 9 个）：`hy3`、`hy3-x`、`hy4-free`、`deepseek-v4-pro-exclusive`、`deepseek-v4.1-flash`、`space-bunny`、`step-5-preview`、`minimax-m3.1-flash`、`mimo-v2.6-pro`。
+
+> 注意 `deepseek-v4-pro` **不在**这个列表里（会报 `400 未知或未配置的 MediaBuddy 模型`），要用的是 `deepseek-v4-pro-exclusive`。`hy4-free` 会报 `model service info not found`，不可用。
+>
+> 随时可以自己验：`.\.venv\Scripts\python.exe scripts\probe_llm.py --prefix REPORT_ENGINE`（会列模型 + 逐个 chat 探测 + 测一次流式，不打印 key）。
 
 **搜索工具**（只影响 Media / Query 两个 Agent，Insight 不用）：
 
@@ -179,5 +202,8 @@ curl.exe -s https://jpn.cdn.moxuna.com/v1/models   # → 401 Invalid token (new_
 3. ✅ ReportEngine 接口注册（`ReportEngine接口已注册`）
 4. ✅ 三个 Streamlit 子应用通过健康检查 `/_stcore/health`
 5. ✅ Insight Agent 端到端跑到 LLM 调用
-6. ✅ 网关鉴权通过，`deepseek-v4.1-flash` 模型存在，`/v1` 路径正确
-7. ⏳ 完整一轮舆情分析（需要库里有数据 + 搜索 key）
+6. ✅ 网关鉴权通过，`deepseek-v4.1-flash` 与 `deepseek-v4-pro-exclusive` 均可流式调用（`scripts/probe_llm.py`）
+7. ✅ `/api/system/start` 一次启动成功，5000/8501/8502/8503 全部监听
+8. ✅ 硬杀 app.py 后子进程全部随之退出（Job Object kill-on-close）
+9. ⏳ 完整一轮舆情分析（需要库里有数据 + 搜索 key）
+

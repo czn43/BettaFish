@@ -660,6 +660,18 @@ def start_streamlit_app(app_name, script_path, port):
         start_msg = f"[{datetime.now().strftime('%H:%M:%S')}] 启动 {app_name} 应用..."
         write_log_to_file(app_name, start_msg)
         
+        # 清掉上一轮遗留的孤儿 streamlit（它们占着端口，还会因为 stdout 管道断掉
+        # 在业务代码里抛 OSError: [Errno 22] Invalid argument）
+        try:
+            from utils.process_guard import free_port
+            for zombie_pid in free_port(port, logger=logger):
+                write_log_to_file(
+                    app_name,
+                    f"[{datetime.now().strftime('%H:%M:%S')}] 清理端口 {port} 上的残留进程 PID {zombie_pid}",
+                )
+        except Exception as exc:  # pragma: no cover
+            logger.debug(f"清理端口 {port} 残留进程失败: {exc}")
+
         cmd = [
             sys.executable, '-m', 'streamlit', 'run',
             script_path,
@@ -699,6 +711,14 @@ def start_streamlit_app(app_name, script_path, port):
         processes[app_name]['status'] = 'starting'
         processes[app_name]['output'] = []
         processes[app_name]['healthcheck_started_at'] = time.time()
+
+        # 挂进 kill-on-close 作业对象：app.py 被强杀时，Windows 会连带杀掉子进程，
+        # 避免留下孤儿占着 8501/8502/8503。
+        try:
+            from utils.process_guard import assign_to_job
+            assign_to_job(process)
+        except Exception as exc:  # pragma: no cover
+            logger.debug(f"子进程作业对象绑定失败: {exc}")
         
         # 启动输出读取线程
         output_thread = threading.Thread(

@@ -24,7 +24,7 @@
 </div>
 
 ## ⚡ Project Overview
-
+<!-- 使用.\.venv\Scripts\python.exe app.py -->
 **"BettaFish"** is an innovative multi-agent public opinion analysis system built from scratch. It helps break information cocoons, restore the original public sentiment, predict future trends, and assist decision-making. Users only need to raise analysis needs like chatting; the agents automatically analyze 30+ mainstream social platforms at home and abroad and millions of public comments.
 
 > Betta is a small yet combative and beautiful fish, symbolizing "small but powerful, fearless of challenges".
